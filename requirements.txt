@@ -1,0 +1,13 @@
+# Firebolt Geospatial Demo Requirements
+
+# Core dependencies
+streamlit>=1.28.0
+pandas>=2.0.0
+plotly>=5.15.0
+python-dotenv>=1.0.0
+
+# Firebolt database connector
+firebolt-sdk>=1.4.0
+
+# Additional utilities
+numpy>=1.24.0
