@@ -25,9 +25,9 @@ def get_connection():
         
         connection = connect(
             auth=auth,
-            account_name=os.getenv("FIREBOLT_ACCOUNT_NAME"),
-            database=os.getenv("FIREBOLT_DATABASE"),
-            engine_name=os.getenv("FIREBOLT_ENGINE")
+            database=os.getenv("FIREBOLT_DATABASE", "playstats"),
+            engine_name=os.getenv("FIREBOLT_ENGINE", "my_engine"),
+            account_name=os.getenv("FIREBOLT_ACCOUNT_NAME", "account-1")
         )
         return connection
     except Exception as e:
@@ -78,13 +78,23 @@ def generate_customer_orders(num_orders=50000):
         order_value = round(np.random.exponential(500) + 50, 2)  # Exponential distribution
         order_date = base_date + timedelta(days=random.randint(0, 90))
         
+        # Generate realistic delivery time based on distance to store
+        distance_factor = np.sqrt(lat_offset**2 + lon_offset**2)  # Approximate distance
+        base_delivery_time = 20  # Base delivery time in minutes
+        distance_delivery_time = distance_factor * 1000  # Distance-based time
+        delivery_time = int(base_delivery_time + distance_delivery_time + np.random.normal(0, 5))
+        delivery_time = max(10, min(90, delivery_time))  # Clamp between 10-90 minutes
+        
         orders.append({
             'order_id': f'ORD_{i+1:06d}',
             'customer_lat': round(customer_lat, 6),
             'customer_lon': round(customer_lon, 6),
             'order_value': order_value,
             'order_date': order_date.strftime('%Y-%m-%d'),
-            'store_id': store['id']
+            'store_id': store['id'],
+            'store_lat': store['lat'],
+            'store_lon': store['lon'],
+            'delivery_time_minutes': delivery_time
         })
         
         if (i + 1) % 10000 == 0:
@@ -144,7 +154,10 @@ def create_tables_if_not_exist(connection):
         customer_lon DOUBLE PRECISION,
         order_value DOUBLE PRECISION,
         order_date TEXT,
-        store_id TEXT
+        store_id TEXT,
+        store_lat DOUBLE PRECISION,
+        store_lon DOUBLE PRECISION,
+        delivery_time_minutes INT
     ) PRIMARY INDEX order_id
     """
     
@@ -189,7 +202,8 @@ def insert_data_batch(connection, table_name, df, batch_size=1000):
             values = []
             for _, row in batch.iterrows():
                 values.append(f"('{row['order_id']}', {row['customer_lat']}, {row['customer_lon']}, "
-                            f"{row['order_value']}, '{row['order_date']}', '{row['store_id']}')")
+                            f"{row['order_value']}, '{row['order_date']}', '{row['store_id']}', "
+                            f"{row['store_lat']}, {row['store_lon']}, {row['delivery_time_minutes']})")
             
             sql = f"INSERT INTO customer_orders VALUES " + ", ".join(values)
             

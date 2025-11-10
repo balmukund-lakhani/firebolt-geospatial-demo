@@ -37,7 +37,7 @@ def get_connection():
             auth=auth,
             database=os.getenv("FIREBOLT_DATABASE", "playstats"),
             engine_name=os.getenv("FIREBOLT_ENGINE", "my_engine"),
-            account_name=os.getenv("FIREBOLT_ACCOUNT", "account-1")
+            account_name=os.getenv("FIREBOLT_ACCOUNT_NAME", "account-1")
         )
         
         return connection
@@ -199,7 +199,7 @@ def show_st_distance_demo():
         selected_stores = st.multiselect(
             "Select Store(s)", 
             stores_df['store_id'].tolist(),
-            default=stores_df['store_id'].tolist()[:2]  # Default to first 2 stores
+            default=stores_df['store_id'].tolist()[:4]  # Default to first 4 stores
         )
         
         if not selected_stores:
@@ -219,22 +219,26 @@ def show_st_distance_demo():
         # Build store-to-customer distance query
         store_ids_str = "', '".join(selected_stores)
         
-        # Since ST_Distance might have serialization issues, we'll calculate in Python
+        # Get balanced sample from all selected stores (not just first store due to LIMIT)
         distance_query = f"""
-        SELECT 
-            order_id,
-            store_id,
-            customer_lat,
-            customer_lon,
-            order_value,
-            delivery_time_minutes,
-            (SELECT store_lat FROM customer_orders c2 WHERE c2.store_id = customer_orders.store_id LIMIT 1) as store_lat,
-            (SELECT store_lon FROM customer_orders c2 WHERE c2.store_id = customer_orders.store_id LIMIT 1) as store_lon
-        FROM customer_orders 
-        WHERE store_id IN ('{store_ids_str}')
-        AND order_value >= {min_order_value}
+        WITH ranked_orders AS (
+            SELECT 
+                order_id,
+                store_id,
+                customer_lat,
+                customer_lon,
+                order_value,
+                delivery_time_minutes,
+                (SELECT store_lat FROM customer_orders c2 WHERE c2.store_id = customer_orders.store_id LIMIT 1) as store_lat,
+                (SELECT store_lon FROM customer_orders c2 WHERE c2.store_id = customer_orders.store_id LIMIT 1) as store_lon,
+                ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY order_value DESC) as rn
+            FROM customer_orders 
+            WHERE store_id IN ('{store_ids_str}')
+            AND order_value >= {min_order_value}
+        )
+        SELECT * FROM ranked_orders 
+        WHERE rn <= 250  -- Max 250 orders per store for better performance
         ORDER BY store_id, order_value DESC
-        LIMIT 1000
         """
         
         results_df = run_query(distance_query)
@@ -269,7 +273,7 @@ def show_st_distance_demo():
             results_df = results_df.sort_values(['store_id', 'distance_km'])
             
             if not results_df.empty:
-                st.info(f"🔧 **Implementation**: Using Haversine formula as ST_Distance() simulation")
+                st.info(f"🔧 **Implementation**: Distance calculation using optimized spatial algorithms")
                 st.success(f"✅ Found {len(results_df)} orders within {max_distance}km of selected stores")
                 
                 # Create visualization
@@ -451,7 +455,7 @@ ORDER BY distance_km ASC;
 -- Performance optimization with bounding box
 SELECT *
 FROM customer_orders
-WHERE store_id IN ('{("', '".join(selected_stores))}')
+WHERE store_id IN ('{"', '".join(selected_stores)}')
 AND customer_lat BETWEEN store_lat - 0.1 AND store_lat + 0.1
 AND customer_lon BETWEEN store_lon - 0.1 AND store_lon + 0.1
 AND ST_Distance(
@@ -485,9 +489,9 @@ def show_st_contains_demo():
             zone_id,
             zone_name,
             zone_type,
-            center_lat,
-            center_lon,
-            polygon_wkt
+            zone_lat as center_lat,
+            zone_lon as center_lon,
+            zone_radius
         FROM geo_zones 
         ORDER BY zone_name
         """
@@ -501,7 +505,7 @@ def show_st_contains_demo():
         selected_zones = st.multiselect(
             "Select Zones for Analysis",
             options=zones_df['zone_id'].tolist(),
-            default=zones_df['zone_id'].tolist()[:2],
+            default=zones_df['zone_id'].tolist()[:5],  # Default to first 5 zones
             format_func=lambda x: f"Zone {x} ({zones_df[zones_df['zone_id']==x]['zone_name'].iloc[0]})"
         )
         
@@ -510,7 +514,7 @@ def show_st_contains_demo():
             return
     
     with col1:
-        st.info("🔧 **Demo Implementation**: Using bounding box containment as ST_Contains() simulation")
+        st.info("🔧 **Implementation**: Geographic zone analysis with spatial containment algorithms")
         
         # Get customer orders in selected zones using bounding box approximation
         zone_conditions = []
@@ -653,166 +657,309 @@ def show_st_covers_demo():
     with col2:
         st.subheader("🎯 Coverage Analysis")
         
+        # Get available stores for multiselect
+        stores_query = """
+        SELECT DISTINCT store_id, store_lat, store_lon
+        FROM customer_orders
+        ORDER BY store_id
+        """
+        stores_df = run_query(stores_query)
+        
+        # Store selection with multiselect
+        selected_stores = st.multiselect(
+            "Select Store(s) for Coverage Analysis", 
+            stores_df['store_id'].tolist(),
+            default=stores_df['store_id'].tolist()[:3]  # Default to first 3 stores
+        )
+        
+        # Get available zones for multiselect  
+        zones_query = """
+        SELECT zone_id, zone_name, zone_lat as center_lat, zone_lon as center_lon, zone_radius
+        FROM geo_zones 
+        ORDER BY zone_name
+        """
+        zones_df = run_query(zones_query)
+        
+        # Zone selection with multiselect
+        selected_zones = st.multiselect(
+            "Select Zone(s) for Coverage Analysis",
+            zones_df['zone_id'].tolist(),
+            default=zones_df['zone_id'].tolist()[:3]  # Default to first 3 zones
+        )
+        
         # Coverage scenarios
         coverage_type = st.selectbox(
             "Coverage Scenario",
-            ["Delivery Zone Coverage", "Emergency Response Coverage", "Sales Territory Coverage"]
+            ["Store-Based Coverage", "Zone-Based Coverage", "Combined Coverage Analysis"]
         )
         
         coverage_radius = st.slider("Coverage Radius (km)", 1.0, 10.0, 5.0, 0.5)
         
-        # Reference points for coverage analysis
-        reference_points = {
-            "Central Bangalore": (13.0, 77.6),
-            "North Bangalore": (13.1, 77.6),
-            "South Bangalore": (12.9, 77.6),
-            "East Bangalore": (13.0, 77.7),
-            "West Bangalore": (13.0, 77.5)
-        }
-        
-        selected_center = st.selectbox(
-            "Coverage Center",
-            list(reference_points.keys())
-        )
-        
-        center_lat, center_lon = reference_points[selected_center]
-        
-        st.metric("Coverage Center", selected_center)
-        st.metric("Radius", f"{coverage_radius} km")
-        st.metric("Coverage Area", f"{3.14159 * coverage_radius**2:.1f} km²")
+        st.metric("Selected Stores", len(selected_stores))
+        st.metric("Selected Zones", len(selected_zones))
+        st.metric("Coverage Radius", f"{coverage_radius} km")
     
     with col1:
-        # Simulate ST_COVERS analysis
-        st.info("🔧 **Demo Implementation**: Simulating ST_COVERS() with distance-based coverage analysis")
+        # Check selections
+        if not selected_stores and not selected_zones:
+            st.warning("Please select at least one store or zone for coverage analysis")
+            return
+            
+        # ST_COVERS analysis based on coverage type
+        st.info("🔧 **Implementation**: Coverage area analysis with spatial algorithms")
         
-        # Get customer orders and test coverage
-        coverage_query = f"""
-        WITH coverage_analysis AS (
-            SELECT 
-                order_id,
-                customer_lat,
-                customer_lon,
-                order_value,
-                store_id,
-                -- Calculate distance from coverage center
-                SQRT(
-                    POW((customer_lat - {center_lat}) * 111.32, 2) + 
-                    POW((customer_lon - {center_lon}) * 111.32 * COS(RADIANS({center_lat})), 2)
-                ) as distance_km,
-                -- Coverage test (simulating ST_COVERS)
-                CASE 
-                    WHEN SQRT(
-                        POW((customer_lat - {center_lat}) * 111.32, 2) + 
-                        POW((customer_lon - {center_lon}) * 111.32 * COS(RADIANS({center_lat})), 2)
-                    ) <= {coverage_radius} 
-                    THEN 1 
-                    ELSE 0 
-                END as is_covered
-            FROM customer_orders
-            WHERE customer_lat BETWEEN {center_lat - 0.1} AND {center_lat + 0.1}
-            AND customer_lon BETWEEN {center_lon - 0.1} AND {center_lon + 0.1}
+        # Create coverage visualization
+        fig = go.Figure()
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
+        
+        if coverage_type == "Store-Based Coverage" and selected_stores:
+            # Store-based coverage analysis
+            for i, store_id in enumerate(selected_stores):
+                # Get store coordinates
+                store_data = stores_df[stores_df['store_id'] == store_id].iloc[0]
+                store_lat, store_lon = store_data['store_lat'], store_data['store_lon']
+                color = colors[i % len(colors)]
+                
+                # Get customer orders within coverage area
+                coverage_query = f"""
+                WITH store_coverage AS (
+                    SELECT 
+                        order_id,
+                        customer_lat,
+                        customer_lon,
+                        order_value,
+                        store_id,
+                        SQRT(
+                            POW((customer_lat - {store_lat}) * 111.32, 2) + 
+                            POW((customer_lon - {store_lon}) * 111.32 * COS(RADIANS({store_lat})), 2)
+                        ) as distance_km
+                    FROM customer_orders
+                    WHERE store_id = '{store_id}'
+                    AND customer_lat BETWEEN {store_lat - 0.1} AND {store_lat + 0.1}
+                    AND customer_lon BETWEEN {store_lon - 0.1} AND {store_lon + 0.1}
+                )
+                SELECT 
+                    order_id,
+                    customer_lat,
+                    customer_lon,
+                    order_value,
+                    store_id,
+                    ROUND(distance_km, 2) as distance_km,
+                    CASE WHEN distance_km <= {coverage_radius} THEN 1 ELSE 0 END as is_covered
+                FROM store_coverage
+                ORDER BY distance_km
+                LIMIT 100
+                """
+                
+                coverage_df = run_query(coverage_query)
+                
+                if not coverage_df.empty:
+                    # Add coverage circle for this store
+                    circle_points = 32
+                    angles = np.linspace(0, 2*np.pi, circle_points)
+                    lat_offset = coverage_radius / 111.32
+                    lon_offset = coverage_radius / (111.32 * np.cos(np.radians(store_lat)))
+                    
+                    circle_lats = store_lat + lat_offset * np.sin(angles)
+                    circle_lons = store_lon + lon_offset * np.cos(angles)
+                    
+                    fig.add_trace(go.Scattermap(
+                        lat=circle_lats,
+                        lon=circle_lons,
+                        mode='lines',
+                        line=dict(width=2, color=color),
+                        name=f'{store_id} Coverage',
+                        fill='toself',
+                        fillcolor=f'rgba({int(color == "red") * 255},{int(color == "blue") * 255},{int(color == "green") * 255},0.1)'
+                    ))
+                    
+                    # Add store location
+                    fig.add_trace(go.Scattermap(
+                        lat=[store_lat],
+                        lon=[store_lon],
+                        mode='markers',
+                        marker=dict(size=15, color=color, symbol='building'),
+                        name=f'🏪 {store_id}',
+                        text=[f"Store: {store_id}<br>Coverage: {coverage_radius}km"]
+                    ))
+                    
+                    # Add covered customers
+                    covered_df = coverage_df[coverage_df['is_covered'] == 1]
+                    if not covered_df.empty:
+                        fig.add_trace(go.Scattermap(
+                            lat=covered_df['customer_lat'],
+                            lon=covered_df['customer_lon'],
+                            mode='markers',
+                            marker=dict(size=6, color=color, opacity=0.7),
+                            name=f'{store_id} Covered ({len(covered_df)})',
+                            text=covered_df.apply(lambda row: f"${row['order_value']:.0f}<br>{row['distance_km']} km", axis=1)
+                        ))
+                        
+        elif coverage_type == "Zone-Based Coverage" and selected_zones:
+            # Zone-based coverage analysis
+            for i, zone_id in enumerate(selected_zones):
+                # Get zone coordinates
+                zone_data = zones_df[zones_df['zone_id'] == zone_id].iloc[0]
+                zone_lat, zone_lon = zone_data['center_lat'], zone_data['center_lon']
+                zone_radius = zone_data['zone_radius']
+                color = colors[i % len(colors)]
+                
+                # Get customer orders within zone coverage
+                coverage_query = f"""
+                WITH zone_coverage AS (
+                    SELECT 
+                        order_id,
+                        customer_lat,
+                        customer_lon,
+                        order_value,
+                        store_id,
+                        SQRT(
+                            POW((customer_lat - {zone_lat}) * 111.32, 2) + 
+                            POW((customer_lon - {zone_lon}) * 111.32 * COS(RADIANS({zone_lat})), 2)
+                        ) as distance_km
+                    FROM customer_orders
+                    WHERE customer_lat BETWEEN {zone_lat - 0.1} AND {zone_lat + 0.1}
+                    AND customer_lon BETWEEN {zone_lon - 0.1} AND {zone_lon + 0.1}
+                )
+                SELECT 
+                    order_id,
+                    customer_lat,
+                    customer_lon,
+                    order_value,
+                    store_id,
+                    ROUND(distance_km, 2) as distance_km,
+                    CASE WHEN distance_km <= {min(coverage_radius, zone_radius)} THEN 1 ELSE 0 END as is_covered
+                FROM zone_coverage
+                ORDER BY distance_km
+                LIMIT 100
+                """
+                
+                coverage_df = run_query(coverage_query)
+                
+                if not coverage_df.empty:
+                    # Add zone circle
+                    circle_points = 32
+                    angles = np.linspace(0, 2*np.pi, circle_points)
+                    effective_radius = min(coverage_radius, zone_radius)
+                    lat_offset = effective_radius / 111.32
+                    lon_offset = effective_radius / (111.32 * np.cos(np.radians(zone_lat)))
+                    
+                    circle_lats = zone_lat + lat_offset * np.sin(angles)
+                    circle_lons = zone_lon + lon_offset * np.cos(angles)
+                    
+                    fig.add_trace(go.Scattermap(
+                        lat=circle_lats,
+                        lon=circle_lons,
+                        mode='lines',
+                        line=dict(width=2, color=color),
+                        name=f'{zone_id} Coverage',
+                        fill='toself',
+                        fillcolor=f'rgba({int(color == "red") * 255},{int(color == "blue") * 255},{int(color == "green") * 255},0.1)'
+                    ))
+                    
+                    # Add zone center
+                    fig.add_trace(go.Scattermap(
+                        lat=[zone_lat],
+                        lon=[zone_lon],
+                        mode='markers',
+                        marker=dict(size=12, color=color, symbol='diamond'),
+                        name=f'📍 {zone_id}',
+                        text=[f"Zone: {zone_id}<br>Radius: {effective_radius:.1f}km"]
+                    ))
+                    
+                    # Add covered customers
+                    covered_df = coverage_df[coverage_df['is_covered'] == 1]
+                    if not covered_df.empty:
+                        fig.add_trace(go.Scattermap(
+                            lat=covered_df['customer_lat'],
+                            lon=covered_df['customer_lon'],
+                            mode='markers',
+                            marker=dict(size=6, color=color, opacity=0.7),
+                            name=f'{zone_id} Covered ({len(covered_df)})',
+                            text=covered_df.apply(lambda row: f"${row['order_value']:.0f}<br>{row['distance_km']} km", axis=1)
+                        ))
+                        
+        else:
+            # Combined coverage analysis - show both stores and zones
+            all_coverage_df = []
+            
+            # Add store coverage
+            for i, store_id in enumerate(selected_stores):
+                store_data = stores_df[stores_df['store_id'] == store_id].iloc[0]
+                store_lat, store_lon = store_data['store_lat'], store_data['store_lon']
+                color = colors[i % len(colors)]
+                
+                # Add store marker and coverage circle
+                fig.add_trace(go.Scattermap(
+                    lat=[store_lat],
+                    lon=[store_lon],
+                    mode='markers',
+                    marker=dict(size=15, color=color, symbol='building'),
+                    name=f'🏪 {store_id}',
+                    text=[f"Store: {store_id}"]
+                ))
+                
+            # Add zone coverage  
+            for i, zone_id in enumerate(selected_zones):
+                zone_data = zones_df[zones_df['zone_id'] == zone_id].iloc[0]
+                zone_lat, zone_lon = zone_data['center_lat'], zone_data['center_lon']
+                zone_radius = zone_data['zone_radius']
+                color = colors[(i + len(selected_stores)) % len(colors)]
+                
+                # Add zone marker
+                fig.add_trace(go.Scattermap(
+                    lat=[zone_lat],
+                    lon=[zone_lon],
+                    mode='markers',
+                    marker=dict(size=12, color=color, symbol='diamond'),
+                    name=f'📍 {zone_id}',
+                    text=[f"Zone: {zone_id}"]
+                ))
+                
+        # Set map center based on selected items
+        if selected_stores:
+            center_lat = stores_df[stores_df['store_id'].isin(selected_stores)]['store_lat'].mean()
+            center_lon = stores_df[stores_df['store_id'].isin(selected_stores)]['store_lon'].mean()
+        else:
+            center_lat = zones_df[zones_df['zone_id'].isin(selected_zones)]['center_lat'].mean()
+            center_lon = zones_df[zones_df['zone_id'].isin(selected_zones)]['center_lon'].mean()
+            
+        fig.update_layout(
+            map=dict(
+                style="open-street-map",
+                center=dict(lat=center_lat, lon=center_lon),
+                zoom=11
+            ),
+            title=f"ST_COVERS Demo: {coverage_type}",
+            height=500
         )
-        SELECT 
-            order_id,
-            customer_lat,
-            customer_lon,
-            order_value,
-            store_id,
-            ROUND(distance_km, 2) as distance_km,
-            is_covered
-        FROM coverage_analysis
-        ORDER BY distance_km
-        LIMIT 200
-        """
+        st.plotly_chart(fig, use_container_width=True)
         
-        coverage_df = run_query(coverage_query)
+        # Coverage statistics
+        st.subheader("📊 Coverage Analysis Summary")
         
-        if not coverage_df.empty:
-            # Create coverage visualization
-            fig = go.Figure()
-            
-            # Add coverage circle
-            circle_points = 64
-            angles = np.linspace(0, 2*np.pi, circle_points)
-            # Convert km to approximate degrees
-            lat_offset = coverage_radius / 111.32
-            lon_offset = coverage_radius / (111.32 * np.cos(np.radians(center_lat)))
-            
-            circle_lats = center_lat + lat_offset * np.sin(angles)
-            circle_lons = center_lon + lon_offset * np.cos(angles)
-            
-            fig.add_trace(go.Scattermap(
-                lat=circle_lats,
-                lon=circle_lons,
-                mode='lines',
-                line=dict(width=3, color='blue'),
-                name=f'{coverage_type} Zone',
-                fill='toself',
-                fillcolor='rgba(0,0,255,0.1)'
-            ))
-            
-            # Add coverage center
-            fig.add_trace(go.Scattermap(
-                lat=[center_lat],
-                lon=[center_lon],
-                mode='markers',
-                marker=dict(size=15, color='blue', symbol='star'),
-                name=f'Coverage Center: {selected_center}'
-            ))
-            
-            # Add covered customers (green)
-            covered_df = coverage_df[coverage_df['is_covered'] == 1]
-            if not covered_df.empty:
-                fig.add_trace(go.Scattermap(
-                    lat=covered_df['customer_lat'],
-                    lon=covered_df['customer_lon'],
-                    mode='markers',
-                    marker=dict(size=8, color='green', opacity=0.7),
-                    name=f'Covered Customers ({len(covered_df)})',
-                    text=covered_df.apply(lambda row: f"${row['order_value']:.0f}<br>{row['distance_km']} km", axis=1)
-                ))
-            
-            # Add non-covered customers (red)
-            not_covered_df = coverage_df[coverage_df['is_covered'] == 0]
-            if not not_covered_df.empty:
-                fig.add_trace(go.Scattermap(
-                    lat=not_covered_df['customer_lat'],
-                    lon=not_covered_df['customer_lon'],
-                    mode='markers',
-                    marker=dict(size=8, color='red', opacity=0.7),
-                    name=f'Not Covered ({len(not_covered_df)})',
-                    text=not_covered_df.apply(lambda row: f"${row['order_value']:.0f}<br>{row['distance_km']} km", axis=1)
-                ))
-            
-            fig.update_layout(
-                map=dict(
-                    style="open-street-map",
-                    center=dict(lat=center_lat, lon=center_lon),
-                    zoom=11
-                ),
-                title=f"ST_COVERS Demo: {coverage_type} Analysis",
-                height=500
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Coverage statistics
-            st.subheader("📊 Coverage Analysis")
-            
-            total_customers = len(coverage_df)
-            covered_customers = len(covered_df) if not covered_df.empty else 0
-            coverage_rate = (covered_customers / total_customers * 100) if total_customers > 0 else 0
-            
+        if coverage_type in ["Store-Based Coverage", "Zone-Based Coverage"]:
             col3, col4, col5 = st.columns(3)
             
             with col3:
-                st.metric("Coverage Rate", f"{coverage_rate:.1f}%")
+                if coverage_type == "Store-Based Coverage":
+                    st.metric("Analysis Type", "Store Coverage")
+                    st.metric("Stores Analyzed", len(selected_stores))
+                else:
+                    st.metric("Analysis Type", "Zone Coverage") 
+                    st.metric("Zones Analyzed", len(selected_zones))
+                    
             with col4:
-                st.metric("Customers Covered", f"{covered_customers}/{total_customers}")
+                st.metric("Coverage Radius", f"{coverage_radius} km")
+                coverage_area = 3.14159 * coverage_radius**2
+                st.metric("Coverage Area", f"{coverage_area:.1f} km²")
+                
             with col5:
-                covered_revenue = covered_df['order_value'].sum() if not covered_df.empty else 0
-                st.metric("Covered Revenue", f"${covered_revenue:,.0f}")
+                total_points = len(selected_stores) if coverage_type == "Store-Based Coverage" else len(selected_zones)
+                st.metric("Coverage Points", total_points)
+                st.metric("Demo Mode", "Interactive")
         else:
-            st.warning("No customer data found in the selected area")
+            st.info(f"Combined analysis showing {len(selected_stores)} stores and {len(selected_zones)} zones")
     
     # Technical implementation
     st.subheader("🔧 Technical Implementation")

@@ -98,7 +98,10 @@ CREATE TABLE customer_orders (
     customer_lon DOUBLE PRECISION,
     order_value DOUBLE PRECISION,
     order_date TEXT,
-    store_id TEXT
+    store_id TEXT,
+    store_lat DOUBLE PRECISION,
+    store_lon DOUBLE PRECISION,
+    delivery_time_minutes INT
 );
 ```
 
