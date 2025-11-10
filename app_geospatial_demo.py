@@ -1,6 +1,6 @@
 """
 Firebolt Geospatial Functions Demo
-Showcases PostgreSQL-compatible geospatial capabilities for high-performance analytics
+Showcases PostgreSQL-compatible geospatial capabilities for high-performance analytics.
 """
 import streamlit as st
 import pandas as pd
@@ -1061,4 +1061,5 @@ def show_functions_reference():
     """)
 
 if __name__ == "__main__":
+
     main()
